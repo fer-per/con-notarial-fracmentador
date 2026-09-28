@@ -1,0 +1,981 @@
+"""
+Vista del Analizador Expandido.
+
+Pestañas por analizador con la lista completa de registros, total de filas,
+click en fila navega al PDF. Tras ejecutar el análisis, las celdas con
+errores se resaltan en rojo.
+"""
+import logging
+import re
+
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
+    QTabWidget,
+)
+from PySide6.QtCore import Qt, QSize, Signal
+
+from src.application.container import Container
+from src.presentation.viewmodels.app_state import AppStateVM
+from src.presentation.viewmodels.analyzer_vm import AnalyzerVM
+from src.presentation.undo_redo import UndoRedo
+from src.domain.entities import AnalysisResult
+from src.presentation.constants import (
+    TOOLBAR_ICON_SIZE, ICON_ANALYZE, ICON_CORRECT,
+)
+from src.presentation.widgets.data_table import DataTable
+from src.presentation.widgets.field_correction_modal import FieldCorrectionModal
+from src.presentation.theme.colors import get_palette
+from src.presentation.theme.fonts import get_font
+from src.presentation.theme.icons import theme_icon, white_icon
+
+logger = logging.getLogger(__name__)
+
+
+class AnalyzerPanel(QWidget):
+    """Panel de resumen compacto de un analizador individual.
+
+    Muestra tres elementos: icono de estado, nombre del analizador y
+    contador de resultados.
+    """
+
+    def __init__(self, name: str, parent=None):
+        super().__init__(parent)
+        self._palette = get_palette()
+        self._result = None
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setSpacing(8)
+
+        self._icon = QLabel("\u23F3")
+        self._icon.setFont(get_font("icon"))
+        self._icon.setFixedWidth(28)
+        self._icon.setStyleSheet("background: transparent;")
+        layout.addWidget(self._icon)
+
+        self._name_label = QLabel(name)
+        self._name_label.setFont(get_font("body_sm_bold"))
+        self._name_label.setStyleSheet("background: transparent;")
+        layout.addWidget(self._name_label, stretch=1)
+
+        self._count_label = QLabel("")
+        self._count_label.setFont(get_font("body_sm_bold"))
+        self._count_label.setStyleSheet("background: transparent;")
+        layout.addWidget(self._count_label)
+
+        self.setStyleSheet(
+            f"background-color: {self._palette['surface']}; "
+            f"border: 1px solid {self._palette['outline_variant']}; "
+            f"border-radius: 8px;"
+        )
+
+    def set_result(self, result):
+        if result is None:
+            return
+
+        self._result = result
+        errors = len(result.errores)
+        warnings = len(result.advertencias)
+
+        if result.ok:
+            self._icon.setText("\u2713")
+            self._count_label.setText(f"{result.total_revisados} OK")
+            self._count_label.setStyleSheet(
+                f"color: {self._palette['success']}; background: transparent;"
+            )
+        else:
+            self._icon.setText("\u26A0")
+            total = errors + warnings
+            self._count_label.setText(f"{total} incidencia(s)")
+            color = self._palette['error'] if errors > 0 else self._palette['warning']
+            self._count_label.setStyleSheet(
+                f"color: {color}; background: transparent;"
+            )
+
+    def reset(self):
+        """Vuelve al estado inicial (sin análisis ejecutado)."""
+        self._result = None
+        self._icon.setText("\u23F3")
+        self._count_label.setText("")
+        self._count_label.setStyleSheet(
+            f"color: {self._palette['text_secondary']}; background: transparent;"
+        )
+
+    def apply_theme(self, dark: bool):
+        """Reaplica los estilos dependientes del tema."""
+        self._palette = get_palette(dark)
+        self._name_label.setStyleSheet(
+            f"color: {self._palette['text_primary']}; background: transparent;"
+        )
+        self.setStyleSheet(
+            f"background-color: {self._palette['surface']}; "
+            f"border: 1px solid {self._palette['outline_variant']}; "
+            f"border-radius: 8px;"
+        )
+        if self._result is not None:
+            self.set_result(self._result)
+
+
+# Columnas comunes de observación presentes en todas las tablas del analizador.
+_OBSERVACION_COLUMNS = [
+    ("Observaciones", "observaciones"),
+    ("Resp. Descripción", "responsable_descripcion"),
+]
+
+_RECORD_COLUMNS = [
+    ("Fila", "fila"),
+    ("N° Reg", "registro"),
+    ("Escribano", "escribano"),
+    ("Prot", "protocolo"),
+    ("Folios", "folios"),
+    ("Pág. PDF", "pg_pdf"),
+    ("Título", "titulo"),
+    ("Tópica", "data_topica"),
+    ("F. Ini", "fecha_inicio"),
+    ("F. Fin", "fecha_fin"),
+    ("Tipo", "tipo"),
+    ("Descripción", "descripcion"),
+    ("Valor Actual", "valor_actual"),
+    ("Esperado", "valor_esperado"),
+] + _OBSERVACION_COLUMNS
+
+# Columnas específicas por analizador (evitar ruido visual mostrando solo
+# los campos relevantes para cada análisis).
+_FOLIOS_COLUMNS = [
+    ("Fila", "fila"),
+    ("N° Reg", "registro"),
+    ("Prot", "protocolo"),
+    ("Folios", "folios"),
+    ("Pág. PDF", "pg_pdf"),
+    ("N° Hojas", "num_hojas"),
+    ("Tipo", "tipo"),
+    ("Descripción", "descripcion"),
+    ("Valor Actual", "valor_actual"),
+    ("Esperado", "valor_esperado"),
+] + _OBSERVACION_COLUMNS
+
+_TOPICA_COLUMNS = [
+    ("Fila", "fila"),
+    ("N° Reg", "registro"),
+    ("Prot", "protocolo"),
+    ("Folios", "folios"),
+    ("Pág. PDF", "pg_pdf"),
+    ("Tópica", "data_topica"),
+    ("Tipo", "tipo"),
+    ("Descripción", "descripcion"),
+    ("Valor Actual", "valor_actual"),
+    ("Esperado", "valor_esperado"),
+] + _OBSERVACION_COLUMNS
+
+_CRONICA_COLUMNS = [
+    ("Fila", "fila"),
+    ("N° Reg", "registro"),
+    ("Prot", "protocolo"),
+    ("Folios", "folios"),
+    ("Pág. PDF", "pg_pdf"),
+    ("F. Ini", "fecha_inicio"),
+    ("Tipo", "tipo"),
+    ("Descripción", "descripcion"),
+    ("Valor Actual", "valor_actual"),
+    ("Esperado", "valor_esperado"),
+] + _OBSERVACION_COLUMNS
+
+_REGISTRO_COLUMNS = [
+    ("Fila", "fila"),
+    ("N° Reg", "registro"),
+    ("Prot", "protocolo"),
+    ("Folios", "folios"),
+    ("Pág. PDF", "pg_pdf"),
+    ("Tipo", "tipo"),
+    ("Descripción", "descripcion"),
+    ("Valor Actual", "valor_actual"),
+    ("Esperado", "valor_esperado"),
+] + _OBSERVACION_COLUMNS
+
+_ESCRIBANO_COLUMNS = [
+    ("Fila", "fila"),
+    ("N° Reg", "registro"),
+    ("Escribano", "escribano"),
+    ("Prot", "protocolo"),
+    ("Folios", "folios"),
+    ("Pág. PDF", "pg_pdf"),
+    ("Tipo", "tipo"),
+    ("Descripción", "descripcion"),
+    ("Valor Actual", "valor_actual"),
+    ("Esperado", "valor_esperado"),
+] + _OBSERVACION_COLUMNS
+
+_PROTOCOLO_COLUMNS = [
+    ("Fila", "fila"),
+    ("N° Reg", "registro"),
+    ("Prot", "protocolo"),
+    ("Folios", "folios"),
+    ("Pág. PDF", "pg_pdf"),
+    ("Tipo", "tipo"),
+    ("Descripción", "descripcion"),
+    ("Valor Actual", "valor_actual"),
+    ("Esperado", "valor_esperado"),
+] + _OBSERVACION_COLUMNS
+
+# Mapea el tipo de error al campo del registro que debe resaltarse en rojo.
+_ERROR_FIELD = {
+    "FORMATO": ("folios",),
+    "SIN_FOLIO": ("folios",),
+    "REPETIDO": ("folios",),
+    "SOLAPAMIENTO": ("folios",),
+    "SALTO": ("folios",),
+    "TOPICA": ("data_topica",),
+    "CRONICA": ("fecha_inicio", "registro"),
+    "COVERAGE": (),
+    "REGISTRO": ("registro",),
+    "ESCRIBANO": ("escribano",),
+    "PROTOCOLO": ("protocolo",),
+}
+
+
+class AnalyzerErrorTab(QWidget):
+    """Pestaña individual de un analizador.
+
+    Muestra la lista completa de registros del inventario y, tras
+    ejecutar el análisis, resalta en rojo las celdas cuyo dato
+    presenta un error. Cada pestaña mantiene su propio historial de
+    Deshacer/Rehacer, independiente de las demás.
+    """
+
+    undo_requested = Signal()
+    redo_requested = Signal()
+
+    def __init__(self, name: str, columns=None, field: str = "",
+                 field_label: str = "", parent=None):
+        super().__init__(parent)
+        self._palette = get_palette()
+        self._name = name
+        self._columns = columns if columns is not None else _RECORD_COLUMNS
+        self._field = field
+        self._field_label = field_label
+        self._all_rows = []
+        self._records = []
+        self._errors = []
+        self._total_revisados = 0
+        self.history = UndoRedo(self)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        # Info bar
+        info_bar = QHBoxLayout()
+        self._info_label = QLabel(f"{name}: sin ejecutar")
+        self._info_label.setFont(get_font("body_sm_bold"))
+        info_bar.addWidget(self._info_label)
+        info_bar.addStretch()
+
+        self._undo_btn = QPushButton("\u21B6 Deshacer")
+        self._undo_btn.setProperty("flat", True)
+        self._undo_btn.setFixedHeight(28)
+        self._undo_btn.setEnabled(False)
+        self._undo_btn.setToolTip("Deshace la última corrección en este analizador")
+        self._undo_btn.clicked.connect(self._on_undo_clicked)
+        info_bar.addWidget(self._undo_btn)
+
+        self._redo_btn = QPushButton("Rehacer \u21B7")
+        self._redo_btn.setProperty("flat", True)
+        self._redo_btn.setFixedHeight(28)
+        self._redo_btn.setEnabled(False)
+        self._redo_btn.setToolTip("Reaplica la última corrección deshecha")
+        self._redo_btn.clicked.connect(self._on_redo_clicked)
+        info_bar.addWidget(self._redo_btn)
+
+        self._filter_btn = QPushButton("Solo L\u00edneas con Error")
+        self._filter_btn.setProperty("flat", True)
+        self._filter_btn.setFixedHeight(28)
+        self._filter_btn.setCheckable(True)
+        self._filter_btn.clicked.connect(self._on_filter_toggled)
+        info_bar.addWidget(self._filter_btn)
+        layout.addLayout(info_bar)
+
+        self.history.changed.connect(self._on_history_changed)
+
+        # Tabla: datos completos del registro + observación/error
+        columns = [label for label, _ in self._columns]
+        field_map = [field for _, field in self._columns]
+        self._table = DataTable(columns=columns, field_map=field_map)
+        layout.addWidget(self._table)
+
+    def _on_undo_clicked(self):
+        self.undo_requested.emit()
+
+    def _on_redo_clicked(self):
+        self.redo_requested.emit()
+
+    def _on_history_changed(self):
+        self._undo_btn.setEnabled(self.history.can_undo)
+        self._redo_btn.setEnabled(self.history.can_redo)
+
+    def set_data(self, records: list, errors: list,
+                 total_revisados: int = 0):
+        """Muestra todos los registros y resalta las celdas con error."""
+        self._records = records
+        self._errors = errors
+        self._total_revisados = total_revisados
+
+        rows = self._build_rows(records, errors)
+        self._all_rows = rows
+
+        fatales = sum(1 for e in errors if e.fatal)
+        warnings = len(errors) - fatales
+        self._info_label.setText(
+            f"{self._name}: {total_revisados} revisados \u2502 "
+            f"{fatales} errores fatales \u2502 {warnings} advertencias"
+        )
+
+        if self._filter_btn.isChecked():
+            self._table.load_data([r for r in rows if r["_errors"]])
+        else:
+            self._table.load_data(rows)
+
+    def reset(self):
+        """Limpia la pestaña (nueva configuración / sin análisis)."""
+        self._records = []
+        self._errors = []
+        self._all_rows = []
+        self._total_revisados = 0
+        self._info_label.setText(f"{self._name}: sin ejecutar")
+        self._table.load_data([])
+        self.history.clear()
+
+    def apply_theme(self, dark: bool):
+        """Reaplica el tema a la tabla de la pestaña."""
+        self._table.apply_theme(dark)
+        if self._records is not None:
+            self.set_data(self._records, self._errors, self._total_revisados)
+
+    def _build_rows(self, records: list, errors: list) -> list:
+        """Construye una fila por registro con sus datos y errores asociados."""
+        errors_by_record = {}
+        for error in errors:
+            errors_by_record.setdefault(error.record_id, []).append(error)
+
+        rows = []
+        for record in records:
+            record_errors = errors_by_record.get(record.id, [])
+            row = {"_record": record, "_errors": record_errors}
+            for _, field in self._columns:
+                row[field] = getattr(record, field, "")
+            row["num_hojas"] = self._count_sheets(row.get("pg_pdf", ""))
+
+            if record_errors:
+                row["tipo"] = ", ".join(e.tipo for e in record_errors)
+                row["descripcion"] = "; ".join(e.descripcion for e in record_errors)
+                row["valor_actual"] = "; ".join(e.valor_actual for e in record_errors)
+                row["valor_esperado"] = "; ".join(e.valor_esperado for e in record_errors)
+            else:
+                row["tipo"] = ""
+                row["descripcion"] = ""
+                row["valor_actual"] = ""
+                row["valor_esperado"] = ""
+
+            error_fields = set()
+            for e in record_errors:
+                error_fields.update(_ERROR_FIELD.get(e.tipo, ()))
+            row["_error_fields"] = error_fields
+            rows.append(row)
+
+        # Errores sin registro asociado (p. ej. cobertura global del PDF)
+        # se muestran como filas sintéticas para que sean visibles y
+        # aparezcan al filtrar "Solo Líneas con Error".
+        record_ids = {record.id for record in records}
+        for error in errors:
+            if error.record_id not in record_ids:
+                rows.append(self._build_error_row(error))
+
+        return rows
+
+    def _build_error_row(self, error) -> dict:
+        """Construye una fila sintética para un error sin registro asociado."""
+        row = {"_record": None, "_errors": [error], "_error_fields": set()}
+        for _, field in self._columns:
+            row.setdefault(field, "")
+        row["fila"] = error.fila
+        row["registro"] = error.record_id
+        row["tipo"] = error.tipo
+        row["descripcion"] = error.descripcion
+        row["valor_actual"] = error.valor_actual
+        row["valor_esperado"] = error.valor_esperado
+        row["num_hojas"] = self._count_sheets(row.get("pg_pdf", ""))
+        return row
+
+    @staticmethod
+    def _count_sheets(pg_pdf: str) -> str:
+        """Cuenta las hojas (páginas PDF) que abarca el rango pg_pdf.
+
+        Soporta rangos simples ("1-4"), sueltos ("7") y manuales
+        ("140-145" o "1,5-7").
+        """
+        pg_pdf = (pg_pdf or "").strip()
+        if not pg_pdf:
+            return ""
+        pages = set()
+        try:
+            for part in re.split(r"[;,]", pg_pdf):
+                part = part.strip()
+                if not part:
+                    continue
+                if "-" in part:
+                    start_str, end_str = part.split("-", 1)
+                    start, end = int(start_str), int(end_str)
+                    step = 1 if start <= end else -1
+                    pages.update(range(start, end + step, step))
+                else:
+                    pages.add(int(part))
+        except ValueError:
+            return ""
+        return str(len(pages)) if pages else ""
+
+    def get_table(self) -> DataTable:
+        return self._table
+
+    def _on_filter_toggled(self):
+        if self._filter_btn.isChecked():
+            self._filter_btn.setText("Mostrar Todos")
+            with_errors = [r for r in self._all_rows if r["_errors"]]
+            self._table.load_data(with_errors)
+        else:
+            self._filter_btn.setText("Solo L\u00edneas con Error")
+            self._table.load_data(self._all_rows)
+
+
+class AnalyzerView(QWidget):
+    """Vista del analizador con pestañas por analizador, total filas, click→PDF."""
+
+    def __init__(self, container: Container, state: AppStateVM, parent=None):
+        super().__init__(parent)
+        self._state = state
+        self._container = container
+        self._vm = AnalyzerVM(container, state)
+        self._palette = get_palette()
+        self._last_result = None
+        self._status_counts = (0, 0, 0)
+        self._setup_ui()
+        self._connect_signals()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
+
+        # Header
+        header = QHBoxLayout()
+        self._heading_icon = QLabel()
+        self._heading_icon.setPixmap(
+            theme_icon(ICON_ANALYZE, False).pixmap(
+                QSize(TOOLBAR_ICON_SIZE, TOOLBAR_ICON_SIZE)
+            )
+        )
+        self._heading_icon.setStyleSheet("background: transparent;")
+        header.addWidget(self._heading_icon)
+
+        title = QLabel("Analizador de Inventario")
+        title.setProperty("heading", True)
+        header.addWidget(title)
+        header.addStretch()
+
+        self._total_label = QLabel("0 filas totales")
+        self._total_label.setFont(get_font("body"))
+        self._total_label.setStyleSheet(f"color: {self._palette['text_secondary']};")
+        header.addWidget(self._total_label)
+
+        self._status_label = QLabel("Sin análisis")
+        self._status_label.setFont(get_font("body_sm_bold"))
+        self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._status_label.setStyleSheet(
+            f"background-color: {self._palette['surface']}; "
+            f"color: {self._palette['text_secondary']}; "
+            f"border: 1px solid {self._palette['outline_variant']}; "
+            f"border-radius: 6px; padding: 4px 10px;"
+        )
+        header.addWidget(self._status_label)
+
+        self._analyze_btn = QPushButton(" Ejecutar Análisis")
+        self._analyze_btn.setFixedHeight(34)
+        self._analyze_btn.setIcon(white_icon(ICON_ANALYZE))
+        self._analyze_btn.setIconSize(QSize(TOOLBAR_ICON_SIZE, TOOLBAR_ICON_SIZE))
+        self._analyze_btn.clicked.connect(self._vm.run_analysis)
+        header.addWidget(self._analyze_btn)
+
+        layout.addLayout(header)
+
+        # Paneles de resumen (2x2 para mayor amplitud y responsividad)
+        panels_layout = QGridLayout()
+        panels_layout.setSpacing(10)
+
+        self._panel_folios = AnalyzerPanel("Folios")
+        self._panel_topica = AnalyzerPanel("Data T\u00f3pica")
+        self._panel_cronica = AnalyzerPanel("Data Cr\u00f3nica")
+        self._panel_coverage = AnalyzerPanel("Cobertura PDF")
+        self._panel_registro = AnalyzerPanel("N\u00famero de Registro")
+        self._panel_escribano = AnalyzerPanel("Escribano")
+        self._panel_protocolo = AnalyzerPanel("Protocolo")
+
+        panels_layout.addWidget(self._panel_folios, 0, 0)
+        panels_layout.addWidget(self._panel_topica, 0, 1)
+        panels_layout.addWidget(self._panel_cronica, 1, 0)
+        panels_layout.addWidget(self._panel_coverage, 1, 1)
+        panels_layout.addWidget(self._panel_registro, 2, 0)
+        panels_layout.addWidget(self._panel_escribano, 2, 1)
+        panels_layout.addWidget(self._panel_protocolo, 3, 0)
+        layout.addLayout(panels_layout)
+
+        # Pestañas por analizador
+        self._tabs = QTabWidget()
+        self._tabs.setTabPosition(QTabWidget.TabPosition.North)
+
+        self._tab_all = AnalyzerErrorTab("Todos")
+        self._tab_folios = AnalyzerErrorTab(
+            "Analizador de Folios", _FOLIOS_COLUMNS,
+            field="folios", field_label="Folios"
+        )
+        self._tab_topica = AnalyzerErrorTab(
+            "Data Tópica", _TOPICA_COLUMNS,
+            field="data_topica", field_label="Data Tópica"
+        )
+        self._tab_cronica = AnalyzerErrorTab(
+            "Data Crónica", _CRONICA_COLUMNS,
+            field="fecha_inicio", field_label="Fecha Inicio"
+        )
+        self._tab_coverage = AnalyzerErrorTab("Cobertura PDF")
+        self._tab_registro = AnalyzerErrorTab(
+            "Analizador de Número de Registro", _REGISTRO_COLUMNS,
+            field="registro", field_label="Número de Registro"
+        )
+        self._tab_escribano = AnalyzerErrorTab(
+            "Analizador de Escribano", _ESCRIBANO_COLUMNS,
+            field="escribano", field_label="Escribano"
+        )
+        self._tab_protocolo = AnalyzerErrorTab(
+            "Analizador de Protocolo", _PROTOCOLO_COLUMNS,
+            field="protocolo", field_label="Protocolo"
+        )
+
+        self._tabs.addTab(self._tab_all, "Todas las Incidencias")
+        self._tabs.addTab(self._tab_folios, "Folios")
+        self._tabs.addTab(self._tab_topica, "Data Tópica")
+        self._tabs.addTab(self._tab_cronica, "Data Crónica")
+        self._tabs.addTab(self._tab_coverage, "Cobertura PDF")
+        self._tabs.addTab(self._tab_registro, "N° Registro")
+        self._tabs.addTab(self._tab_escribano, "Escribano")
+        self._tabs.addTab(self._tab_protocolo, "Protocolo")
+
+        layout.addWidget(self._tabs, stretch=1)
+
+        # Botón corregir
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        tip = QLabel("\u2139  Haz clic en un error para navegar a la página PDF correspondiente")
+        tip.setFont(get_font("body_xs"))
+        tip.setStyleSheet(f"color: {self._palette['text_disabled']};")
+        self._tip_label = tip
+        btn_layout.addWidget(tip)
+        btn_layout.addStretch()
+
+        self._correct_btn = QPushButton(" Corregir Seleccionado")
+        self._correct_btn.setProperty("role", "correct")
+        self._correct_btn.setEnabled(False)
+        self._correct_btn.setIcon(theme_icon(ICON_CORRECT, False))
+        self._correct_btn.setIconSize(QSize(TOOLBAR_ICON_SIZE, TOOLBAR_ICON_SIZE))
+        self._correct_btn.clicked.connect(self._on_correct)
+        btn_layout.addWidget(self._correct_btn)
+
+        self._validate_btn = QPushButton(" Validar como Correcto")
+        self._validate_btn.setProperty("role", "validate")
+        self._validate_btn.setEnabled(False)
+        self._validate_btn.setCheckable(True)
+        self._validate_btn.setIcon(theme_icon(ICON_CORRECT, False))
+        self._validate_btn.setIconSize(QSize(TOOLBAR_ICON_SIZE, TOOLBAR_ICON_SIZE))
+        self._validate_btn.clicked.connect(self._on_validate_toggled)
+        btn_layout.addWidget(self._validate_btn)
+        layout.addLayout(btn_layout)
+
+        for btn in (self._correct_btn, self._validate_btn):
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
+    def _connect_signals(self):
+        self._vm.analysis_finished.connect(self._on_analysis_finished)
+        self._vm.analysis_started.connect(
+            lambda: self._analyze_btn.setEnabled(False)
+        )
+        self._vm.correction_applied.connect(self._vm.run_analysis)
+
+        # Si el editor PDF excluye/reordena hojas, el mapeo pg_pdf cambia:
+        # re-renderizar las pestañas con los registros y el último análisis.
+        self._state.records_changed.connect(self._on_records_changed)
+
+        # Conectar click en cada tabla de error → habilitar corrección + navegar PDF
+        for tab in [self._tab_all, self._tab_folios, self._tab_topica,
+                     self._tab_cronica, self._tab_coverage,
+                     self._tab_registro, self._tab_escribano,
+                     self._tab_protocolo]:
+            tab.get_table().row_clicked.connect(
+                lambda row, data, t=tab: self._on_error_row_clicked(row, data, t)
+            )
+            tab.undo_requested.connect(lambda t=tab: self._on_undo(t))
+            tab.redo_requested.connect(lambda t=tab: self._on_redo(t))
+
+    def _on_error_row_clicked(self, row: int, data, tab):
+        """Guarda selección, habilita corrección/validación y navega a la página PDF."""
+        self._current_tab = tab
+        self._current_row_data = data
+        record = data.get("_record") if isinstance(data, dict) else data
+
+        # Permite editar la fila: campo del analizador y/o paginación PDF.
+        # Las filas sintéticas (errores globales) no tienen registro editable.
+        self._correct_btn.setEnabled(record is not None)
+
+        # Estado del botón validar según el registro seleccionado
+        rid = record.id if record is not None else None
+        self._validate_btn.setEnabled(rid is not None)
+        self._validate_btn.setChecked(
+            rid in self._state.incidencias_validadas
+        )
+
+        # Navegar a la página PDF asignada del registro
+        if record is not None and record.pg_pdf:
+            try:
+                first_page = int(record.pg_pdf.split('-')[0])
+                # pg_pdf es la posición renumerada (con editor activo) o la
+                # página física (idéntica a la posición sin editor): navegar
+                # directo a la vista previa.
+                self._state.pdf_current_page = first_page
+                main_window = self.window()
+                if hasattr(main_window, '_render_current_page'):
+                    main_window._render_current_page()
+            except (ValueError, IndexError):
+                pass
+
+    def _on_validate_toggled(self, checked: bool):
+        """Marca/desmarca la incidencia del registro seleccionado como válida."""
+        rid = self._current_row_data.get("_record") if isinstance(
+            self._current_row_data, dict) else None
+        if rid is None:
+            return
+        rid = rid.id
+        tab = getattr(self, '_current_tab', None)
+        antes = set(self._state.incidencias_validadas)
+        validadas = set(antes)
+        if checked:
+            validadas.add(rid)
+        else:
+            validadas.discard(rid)
+        self._state.incidencias_validadas = validadas
+        self._state.add_log(
+            "SUCCESS",
+            f"Registro {rid} {'validado como correcto' if checked else 'desmarcado'}."
+        )
+        if tab is not None:
+            tab.history.push({
+                "desc": "validar" if checked else "desmarcar",
+                "revert": [("@validated", None, antes)],
+                "apply": [("@validated", None, set(validadas))],
+            })
+        if self._last_result is not None:
+            self._on_analysis_finished(self._last_result)
+
+    @staticmethod
+    def _filter_validated(errors: list, validadas: set) -> list:
+        """Excluye errores de registros cuya incidencia fue validada."""
+        if not validadas:
+            return list(errors)
+        return [e for e in errors if e.record_id not in validadas]
+
+    def _on_records_changed(self):
+        """Re-renderiza las pestañas con el mapeo pg_pdf vigente.
+
+        Se dispara cuando el editor PDF excluye/reordena hojas y cambia el
+        mapeo folio → página. Reusa el último análisis para no re-ejecutarlo.
+        """
+        if self._last_result is not None:
+            self._on_analysis_finished(self._last_result)
+
+    def _on_analysis_finished(self, result):
+        self._last_result = result
+        self._analyze_btn.setEnabled(True)
+
+        # Total de filas
+        total = len(self._state.records)
+        self._total_label.setText(f"{total} filas totales en el Excel")
+
+        # Incidencias validadas no se muestran como error
+        validadas = self._state.incidencias_validadas
+
+        # Actualizar paneles (sin incidencias validadas)
+        self._panel_folios.set_result(self._filter_result(result.folios_result))
+        self._panel_topica.set_result(self._filter_result(result.topica_result))
+        self._panel_cronica.set_result(self._filter_result(result.cronica_result))
+        self._panel_coverage.set_result(self._filter_result(result.coverage_result))
+        self._panel_registro.set_result(self._filter_result(result.registro_result))
+        self._panel_escribano.set_result(self._filter_result(result.escribano_result))
+        self._panel_protocolo.set_result(self._filter_result(result.protocolo_result))
+
+        # Combinar todos los errores (filtrando los validados)
+        all_errors = []
+        folios_errors = []
+        topica_errors = []
+        cronica_errors = []
+        coverage_errors = []
+        registro_errors = []
+        escribano_errors = []
+        protocolo_errors = []
+
+        if result.folios_result:
+            folios_errors = self._filter_validated(
+                result.folios_result.errores + result.folios_result.advertencias,
+                validadas,
+            )
+            all_errors.extend(folios_errors)
+
+        if result.topica_result:
+            topica_errors = self._filter_validated(
+                result.topica_result.advertencias, validadas
+            )
+            all_errors.extend(topica_errors)
+
+        if result.cronica_result:
+            cronica_errors = self._filter_validated(
+                result.cronica_result.errores + result.cronica_result.advertencias,
+                validadas,
+            )
+            all_errors.extend(cronica_errors)
+
+        if result.coverage_result:
+            coverage_errors = self._filter_validated(
+                result.coverage_result.errores, validadas
+            )
+            all_errors.extend(coverage_errors)
+
+        if result.registro_result:
+            registro_errors = self._filter_validated(
+                result.registro_result.advertencias, validadas
+            )
+            all_errors.extend(registro_errors)
+
+        if result.escribano_result:
+            escribano_errors = self._filter_validated(
+                result.escribano_result.advertencias, validadas
+            )
+            all_errors.extend(escribano_errors)
+
+        if result.protocolo_result:
+            protocolo_errors = self._filter_validated(
+                result.protocolo_result.errores + result.protocolo_result.advertencias,
+                validadas,
+            )
+            all_errors.extend(protocolo_errors)
+
+        # Chip de estado del encabezado: verde si todo OK, rojo si no.
+        fatales = sum(1 for e in all_errors if e.fatal)
+        advertencias = len(all_errors) - fatales
+        self._set_status(fatales, advertencias, total)
+
+        # Llenar pestañas con la lista completa de registros
+        records = list(self._state.records)
+        self._tab_all.set_data(records, all_errors, total)
+        self._tab_folios.set_data(
+            records, folios_errors,
+            result.folios_result.total_revisados if result.folios_result else 0,
+        )
+        self._tab_topica.set_data(
+            records, topica_errors,
+            result.topica_result.total_revisados if result.topica_result else 0,
+        )
+        self._tab_cronica.set_data(
+            records, cronica_errors,
+            result.cronica_result.total_revisados if result.cronica_result else 0,
+        )
+        self._tab_coverage.set_data(
+            records, coverage_errors,
+            result.coverage_result.total_revisados if result.coverage_result else 0,
+        )
+        self._tab_registro.set_data(
+            records, registro_errors,
+            result.registro_result.total_revisados if result.registro_result else 0,
+        )
+        self._tab_escribano.set_data(
+            records, escribano_errors,
+            result.escribano_result.total_revisados if result.escribano_result else 0,
+        )
+        self._tab_protocolo.set_data(
+            records, protocolo_errors,
+            result.protocolo_result.total_revisados if result.protocolo_result else 0,
+        )
+
+        self._correct_btn.setEnabled(False)
+        self._validate_btn.setEnabled(False)
+
+    def _set_status(self, fatales: int, advertencias: int, total: int):
+        """Actualiza el chip de estado del encabezado.
+
+        Fondo verde si no hay incidencias; fondo rojo si hay alguna
+        inconsistencia. Muestra el resumen similar al de la pestaña
+        "Todas las Incidencias".
+        """
+        self._status_counts = (fatales, advertencias, total)
+        if fatales == 0 and advertencias == 0:
+            texto = f"\u2713 Sin incidencias \u00b7 {total} revisados"
+            bg, fg = self._palette['success_bg'], self._palette['success']
+        else:
+            texto = (
+                f"\u26A0 {fatales + advertencias} incidencia(s) \u00b7 "
+                f"{fatales} fatal(es) \u00b7 {advertencias} advertencia(s)"
+            )
+            bg, fg = self._palette['error_bg'], self._palette['error']
+        self._status_label.setText(texto)
+        self._status_label.setStyleSheet(
+            f"background-color: {bg}; color: {fg}; "
+            f"border-radius: 6px; padding: 4px 10px;"
+        )
+
+    def _filter_result(self, result):
+        """Devuelve una copia del resultado sin incidencias validadas."""
+        if result is None:
+            return None
+        validadas = self._state.incidencias_validadas
+        return AnalysisResult(
+            nombre=result.nombre,
+            total_revisados=result.total_revisados,
+            errores=[e for e in result.errores if e.record_id not in validadas],
+            advertencias=[e for e in result.advertencias if e.record_id not in validadas],
+            info_extra=result.info_extra,
+        )
+
+    def apply_theme(self, dark: bool):
+        """Reaplica el tema a paneles, pestañas y etiquetas."""
+        self._palette = get_palette(dark)
+        self._heading_icon.setPixmap(
+            theme_icon(ICON_ANALYZE, dark).pixmap(
+                QSize(TOOLBAR_ICON_SIZE, TOOLBAR_ICON_SIZE)
+            )
+        )
+        self._analyze_btn.setIcon(white_icon(ICON_ANALYZE))
+        self._correct_btn.setIcon(theme_icon(ICON_CORRECT, dark))
+        self._validate_btn.setIcon(theme_icon(ICON_CORRECT, dark))
+        self._total_label.setStyleSheet(
+            f"color: {self._palette['text_secondary']};"
+        )
+        self._set_status(*self._status_counts)
+        self._tip_label.setStyleSheet(
+            f"color: {self._palette['text_disabled']};"
+        )
+        for panel in (self._panel_folios, self._panel_topica,
+                      self._panel_cronica, self._panel_coverage,
+                      self._panel_registro, self._panel_escribano,
+                      self._panel_protocolo):
+            panel.apply_theme(dark)
+        for tab in (self._tab_all, self._tab_folios, self._tab_topica,
+                    self._tab_cronica, self._tab_coverage,
+                    self._tab_registro, self._tab_escribano,
+                    self._tab_protocolo):
+            tab.apply_theme(dark)
+
+    def refresh_from_state(self):
+        """Limpia el analizador cuando se crea una configuración nueva."""
+        self._last_result = None
+        self._status_counts = (0, 0, 0)
+        self._total_label.setText("0 filas totales")
+        self._status_label.setText("Sin análisis")
+        self._status_label.setStyleSheet(
+            f"background-color: {self._palette['surface']}; "
+            f"color: {self._palette['text_secondary']}; "
+            f"border: 1px solid {self._palette['outline_variant']}; "
+            f"border-radius: 6px; padding: 4px 10px;"
+        )
+        for panel in (self._panel_folios, self._panel_topica,
+                      self._panel_cronica, self._panel_coverage,
+                      self._panel_registro, self._panel_escribano,
+                      self._panel_protocolo):
+            panel.reset()
+        for tab in (self._tab_all, self._tab_folios, self._tab_topica,
+                    self._tab_cronica, self._tab_coverage,
+                    self._tab_registro, self._tab_escribano,
+                    self._tab_protocolo):
+            tab.reset()
+        self._correct_btn.setEnabled(False)
+        self._validate_btn.setEnabled(False)
+        self._analyze_btn.setEnabled(True)
+
+    def _on_correct(self):
+        """Abre el modal de edición para el registro/fragmente seleccionado."""
+        tab = getattr(self, '_current_tab', None)
+        field = getattr(tab, '_field', "") if tab else ""
+        field_label = getattr(tab, '_field_label', field) or field
+
+        record = self._current_row_data.get("_record") if isinstance(
+            self._current_row_data, dict) else None
+        if record is None:
+            return
+
+        campos = [c for c in {
+            field, "comparte_hoja", "pg_pdf_manual", "pg_pdf", "estado"
+        } if c]
+        antes = self._snapshot(record, campos)
+
+        modal = FieldCorrectionModal(
+            record, field, field_label, self, dark=self._state.dark_mode
+        )
+        modal.correction_accepted.connect(
+            lambda rid, cambios, t=tab, a=antes, c=campos:
+            self._on_correction_accepted(t, rid, cambios, a, c)
+        )
+        modal.exec()
+
+    def _on_correction_accepted(self, tab, rid, cambios, antes, campos):
+        """Aplica una corrección y la registra en el historial de su analizador."""
+        self._vm.apply_changes(rid, cambios)
+        record = self._find_record(rid)
+        despues = self._snapshot(record, campos) if record else antes
+        if antes != despues:
+            tab.history.push({
+                "desc": "corrección",
+                "revert": antes,
+                "apply": despues,
+            })
+
+    def _snapshot(self, record, campos: list) -> list:
+        """Captura los valores actuales de un registro para el historial."""
+        return [(record.id, c, getattr(record, c, "")) for c in campos]
+
+    def _find_record(self, rid):
+        for rec in self._state.records:
+            if rec.id == rid:
+                return rec
+        return None
+
+    def _apply_entries(self, entries):
+        """Aplica una lista de entradas (registro/campo/valor) del historial."""
+        for rid, campo, valor in entries:
+            if campo == "@validated":
+                self._state.incidencias_validadas = set(valor)
+                continue
+            rec = self._find_record(rid)
+            if rec is not None:
+                setattr(rec, campo, valor)
+
+    def _on_undo(self, tab):
+        """Deshace la última acción del analizador correspondiente."""
+        action = tab.history.undo()
+        if action is None:
+            return
+        self._apply_entries(action["revert"])
+        self._state.add_log("INFO", f"Deshecha: {action.get('desc', 'acción')}")
+        self._vm.guardar_en_excel()
+        self._vm.run_analysis()
+
+    def _on_redo(self, tab):
+        """Reaplica la última acción deshecha del analizador."""
+        action = tab.history.redo()
+        if action is None:
+            return
+        self._apply_entries(action["apply"])
+        self._state.add_log("INFO", f"Rehecha: {action.get('desc', 'acción')}")
+        self._vm.guardar_en_excel()
+        self._vm.run_analysis()

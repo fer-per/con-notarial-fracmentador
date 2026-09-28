@@ -1,0 +1,275 @@
+"""Tests para la capa de aplicación."""
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+
+import pytest
+from unittest.mock import MagicMock, patch
+from src.domain.entities import InventoryRecord, ExclusionRule, AnalysisError
+from src.application.dto import ResultadoCarga, ResultadoAnalisis, ResultadoFragmentacion
+from src.application.use_cases.analyze_data import AnalizarDatosUseCase
+from src.application.use_cases.manage_exclusions import GestionarExclusionesUseCase
+from src.application.use_cases.load_inventory import CargarInventarioUseCase
+
+
+def _rec(
+    id: str = "#0001", fila: int = 10, folios: str = "001r-002v",
+    data_topica: str = "Ciudad", fecha_inicio: str = "15/03/1891",
+    registro: str = "001", escribano: str = "García",
+    protocolo: str = "1", **kwargs
+) -> InventoryRecord:
+    return InventoryRecord(
+        id=id, fila=fila, registro=registro, escribano=escribano,
+        protocolo=protocolo, folios=folios, pg_pdf="", titulo="Compraventa",
+        data_topica=data_topica, fecha_inicio=fecha_inicio, **kwargs,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+# ANALIZAR DATOS USE CASE
+# ═══════════════════════════════════════════════════════════════
+
+class TestAnalizarDatosUseCase:
+    """Tests para el caso de uso AnalizarDatos."""
+
+    def test_analisis_sin_errores(self):
+        records = [
+            _rec(id="#0001", folios="001r-002v"),
+            _rec(id="#0002", fila=11, folios="003r-004v"),
+        ]
+        uc = AnalizarDatosUseCase()
+        result = uc.ejecutar(records)
+
+        assert isinstance(result, ResultadoAnalisis)
+        assert result.folios_result is not None
+        assert result.topica_result is not None
+        assert result.cronica_result is not None
+        assert result.registro_result is not None
+        assert result.escribano_result is not None
+        assert result.protocolo_result is not None
+        assert result.folios_result.ok
+
+    def test_analisis_con_salto(self):
+        records = [
+            _rec(id="#0001", folios="001r-002v"),
+            _rec(id="#0002", fila=11, folios="005r-006v"),
+        ]
+        uc = AnalizarDatosUseCase()
+        result = uc.ejecutar(records)
+
+        assert result.folios_result is not None
+        assert len(result.folios_result.advertencias) == 1
+
+    def test_analisis_con_coverage(self):
+        records = [_rec(id="#0001", folios="001r-002v")]
+        uc = AnalizarDatosUseCase()
+        result = uc.ejecutar(records, total_pdf_pages=10)
+
+        assert result.coverage_result is not None
+        assert result.coverage_result.ok
+
+    def test_analisis_sin_coverage_cuando_no_hay_pdf(self):
+        records = [_rec()]
+        uc = AnalizarDatosUseCase()
+        result = uc.ejecutar(records, total_pdf_pages=0)
+
+        assert result.coverage_result is None
+
+    def test_records_con_error_marcados_revisar(self):
+        records = [
+            _rec(id="#0001", folios="001r-002v"),
+            _rec(id="#0002", fila=11, folios="abc"),  # Formato inválido (fatal)
+        ]
+        uc = AnalizarDatosUseCase()
+        result = uc.ejecutar(records)
+
+        revisar = [r for r in result.records if r.estado == "REVISAR"]
+        assert len(revisar) == 1
+        assert revisar[0].id == "#0002"
+
+    def test_sin_folio_no_marca_revisar_ni_genera_sugerencia(self):
+        records = [
+            _rec(id="#0001", folios="001r-002v"),
+            _rec(id="#0002", fila=11, folios="003r-004r"),
+            _rec(id="#0003", fila=12, folios="S/F"),
+            _rec(id="#0004", fila=13, folios="004v-006r"),
+        ]
+        uc = AnalizarDatosUseCase()
+        result = uc.ejecutar(records)
+
+        revisar = [r for r in result.records if r.estado == "REVISAR"]
+        assert revisar == []
+
+        tipos = [e.tipo for e in result.folios_result.advertencias]
+        assert tipos == ["SIN_FOLIO"]
+        assert tipos.count("SALTO") == 0
+
+        assert all(s.tipo_error != "SIN_FOLIO" for s in result.suggestions)
+
+    def test_analisis_incorpora_registro_escribano_protocolo(self):
+        """Los analizadores de registro, escribano y protocolo se ejecutan
+        y sus incidencias llegan a las sugerencias."""
+        records = [
+            _rec(id="#0001", registro="", protocolo="", escribano=""),
+            _rec(id="#0002", fila=11, registro="005", protocolo="1",
+                 escribano="García"),
+        ]
+        uc = AnalizarDatosUseCase()
+        result = uc.ejecutar(records)
+
+        assert len(result.registro_result.advertencias) >= 1
+        assert len(result.escribano_result.advertencias) >= 1
+        assert len(result.protocolo_result.advertencias) >= 1
+
+        tipos = {s.tipo_error for s in result.suggestions}
+        assert "REGISTRO" in tipos
+        assert "ESCRIBANO" in tipos
+        assert "PROTOCOLO" in tipos
+
+    def test_regresion_de_protocolo_marca_revisar(self):
+        """La regresión de protocolo (fatal) marca el registro como REVISAR."""
+        records = [
+            _rec(id="#0001", protocolo="3", escribano="García"),
+            _rec(id="#0002", fila=11, protocolo="1", escribano="García"),
+        ]
+        uc = AnalizarDatosUseCase()
+        result = uc.ejecutar(records)
+
+        revisar = [r for r in result.records if r.estado == "REVISAR"]
+        assert len(revisar) == 1
+        assert revisar[0].id == "#0002"
+
+
+# ═══════════════════════════════════════════════════════════════
+# GESTIONAR EXCLUSIONES USE CASE
+# ═══════════════════════════════════════════════════════════════
+
+class TestGestionarExclusionesUseCase:
+    """Tests para el caso de uso GestionarExclusiones."""
+
+    def test_agregar_salto(self):
+        uc = GestionarExclusionesUseCase()
+        result = uc.agregar_salto([], desde=5, hasta=10, motivo="Folios en blanco")
+
+        assert len(result) == 1
+        assert result[0].tipo == "SALTO"
+        assert result[0].desde == 5
+        assert result[0].hasta == 10
+
+    def test_agregar_ignorar(self):
+        uc = GestionarExclusionesUseCase()
+        result = uc.agregar_ignorar(
+            [], desde=2, hasta=3, motivo="Portada",
+            tipo_contenido="Portada",
+        )
+
+        assert len(result) == 1
+        assert result[0].tipo == "IGNORAR"
+        assert result[0].tipo_contenido == "Portada"
+
+    def test_eliminar_exclusion(self):
+        uc = GestionarExclusionesUseCase()
+        excl = ExclusionRule(id="E1", tipo="SALTO", desde=5, hasta=10, motivo="Test")
+        result = uc.eliminar_exclusion([excl], "E1")
+
+        assert len(result) == 0
+
+    def test_eliminar_inexistente(self):
+        uc = GestionarExclusionesUseCase()
+        excl = ExclusionRule(id="E1", tipo="SALTO", desde=5, hasta=10, motivo="Test")
+        result = uc.eliminar_exclusion([excl], "E99")
+
+        assert len(result) == 1  # No se eliminó nada
+
+    def test_inmutabilidad(self):
+        """agregar_salto no modifica la lista original."""
+        uc = GestionarExclusionesUseCase()
+        original = []
+        result = uc.agregar_salto(original, desde=1, hasta=5, motivo="Test")
+
+        assert len(original) == 0
+        assert len(result) == 1
+
+
+# ═══════════════════════════════════════════════════════════════
+# CARGAR INVENTARIO USE CASE
+# ═══════════════════════════════════════════════════════════════
+
+class TestCargarInventarioUseCase:
+    """Tests para el caso de uso CargarInventario con mock."""
+
+    def test_carga_con_mock(self):
+        mock_repo = MagicMock()
+        mock_repo.detectar_fila_inicio_datos.return_value = None
+        mock_repo.extraer_metadatos.return_value = {
+            "filepath": "test.xlsx",
+            "siglo": "XIX",
+            "acervo_num": "7",
+        }
+        mock_repo.cargar_registros.return_value = [
+            _rec(id="#0001", folios="001r-002v"),
+            _rec(id="#0002", fila=11, folios="003r-004v"),
+        ]
+
+        uc = CargarInventarioUseCase(mock_repo)
+        result = uc.ejecutar(
+            "test.xlsx", fila_datos_inicio=10, fila_inicio=10, fila_fin=500
+        )
+
+        assert isinstance(result, ResultadoCarga)
+        assert len(result.records) == 2
+        assert result.metadata["total_records"] == 2
+        assert result.metadata["fila_datos_inicio"] == 10
+        mock_repo.cargar_registros.assert_called_once_with(
+            "test.xlsx", 10, 10, 500
+        )
+
+    def test_auto_detect_sobreescribe_fila_inicio(self):
+        mock_repo = MagicMock()
+        mock_repo.detectar_fila_inicio_datos.return_value = 12
+        mock_repo.extraer_metadatos.return_value = {"filepath": "t.xlsx", "siglo": "", "acervo_num": "7"}
+        mock_repo.cargar_registros.return_value = []
+
+        uc = CargarInventarioUseCase(mock_repo)
+        result = uc.ejecutar(
+            "t.xlsx", fila_datos_inicio=10, fila_inicio=10, fila_fin=500
+        )
+
+        assert result.metadata["fila_datos_inicio"] == 12
+        mock_repo.cargar_registros.assert_called_once_with(
+            "t.xlsx", 12, 10, 500
+        )
+
+    def test_auto_detect_deshabilitado_no_sobreescribe(self):
+        mock_repo = MagicMock()
+        mock_repo.detectar_fila_inicio_datos.return_value = 12
+        mock_repo.extraer_metadatos.return_value = {"filepath": "t.xlsx", "siglo": "", "acervo_num": "7"}
+        mock_repo.cargar_registros.return_value = []
+
+        uc = CargarInventarioUseCase(mock_repo)
+        result = uc.ejecutar(
+            "t.xlsx", fila_datos_inicio=10, fila_inicio=10, fila_fin=500,
+            auto_detect=False,
+        )
+
+        assert result.metadata["fila_datos_inicio"] == 10
+        mock_repo.cargar_registros.assert_called_once_with(
+            "t.xlsx", 10, 10, 500
+        )
+
+    def test_carga_con_errores_marca_revisar(self):
+        mock_repo = MagicMock()
+        mock_repo.detectar_fila_inicio_datos.return_value = None
+        mock_repo.extraer_metadatos.return_value = {"filepath": "t.xlsx", "siglo": "", "acervo_num": "7"}
+        mock_repo.cargar_registros.return_value = [
+            _rec(id="#0001", folios="abc"),  # Formato inválido
+        ]
+
+        uc = CargarInventarioUseCase(mock_repo)
+        result = uc.ejecutar(
+            "t.xlsx", fila_datos_inicio=12, fila_inicio=12, fila_fin=500
+        )
+
+        assert len(result.errors) >= 1
+        revisar = [r for r in result.records if r.estado == "REVISAR"]
+        assert len(revisar) == 1
