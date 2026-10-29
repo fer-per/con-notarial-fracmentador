@@ -383,6 +383,7 @@ class MainWindow(QMainWindow):
             # Resolver adjuntos del perfil (copias del Excel/PDF)
             _resolver_adjuntos(data)
             self._state.from_dict(data)
+            self._container.set_modelo(self._state.modelo_id)
             self._state.profile_name = nombre
             self._header.set_profile_name(nombre)
             self._state.add_log(
@@ -419,6 +420,7 @@ class MainWindow(QMainWindow):
         if conf.clickedButton() is not si_btn:
             return
         self._state.reset()
+        self._container.set_modelo(self._state.modelo_id)
         self._header.set_profile_name("")
         self._refresh_all_views()
         self.navigate_to(ViewId.WORKSPACE)

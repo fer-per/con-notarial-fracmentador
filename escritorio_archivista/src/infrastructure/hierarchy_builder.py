@@ -1,13 +1,13 @@
 """
-Constructor de jerarquía documental de 11 niveles.
+Constructor de jerarquía documental configurable (11/12 niveles).
 
 Genera las rutas de carpetas para organizar los fragmentos PDF
-siguiendo la estructura archivística definida. La jerarquía SIEMPRE
-se construye de forma íntegra con sus 11 niveles; cada nivel que
-carece del dato correspondiente usa un nombre de respaldo (SIN ...)
-y se continúa con los siguientes niveles.
+siguiendo la plantilla del modelo de catálogo activo. La jerarquía
+SIEMPRE se construye de forma íntegra; cada nivel que carece del dato
+correspondiente usa un nombre de respaldo (SIN ...) y se continúa con
+los siguientes niveles.
 
-Niveles:
+Niveles históricos:
 1. ACERVO DOCUMENTAL NUMERO {acervo_num}     ← metadato (fila del Excel)
 2. SIGLO {siglo_arabigo}                     ← metadato (fila del Excel)
 3. FONDO DOCUMENTAL                          ← constante
@@ -38,6 +38,7 @@ import re
 from typing import Optional, Tuple
 
 from src.domain.entities import InventoryRecord
+from src.domain.modelo_catalogo import ModeloCatalogo, NivelJerarquia
 from src.domain.ports.hierarchy_port import HierarchyBuilderPort
 from src.domain.value_objects import (
     MONTH_NAMES,
@@ -54,6 +55,7 @@ from src.domain.value_objects import (
     SIN_MES,
     INTERESADOS_ILEGIBLES,
 )
+from src.infrastructure.modelo_repository import ModeloRepository
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,13 @@ class HierarchyBuilder(HierarchyBuilderPort):
     usa su nombre de respaldo.
     """
 
+    def __init__(self, modelo: Optional[ModeloCatalogo] = None):
+        self._modelo = modelo or ModeloRepository().cargar("historico")
+
+    def set_modelo(self, modelo: ModeloCatalogo):
+        """Cambia la plantilla de jerarquía usada por el builder."""
+        self._modelo = modelo
+
     def construir_ruta(
         self,
         record: InventoryRecord,
@@ -74,26 +83,149 @@ class HierarchyBuilder(HierarchyBuilderPort):
         escribano: str = "",
         siglo: str = "",
     ) -> str:
-        """Construye la ruta completa de 11 niveles para un registro."""
+        """Construye la ruta completa según la plantilla del modelo activo."""
         anio, mes = self._extraer_anio_mes(record)
         registro_id = record.id.replace("#", "")
 
-        niveles = [
-            self._nivel_acervo(acervo_num),
-            self._nivel_siglo(siglo, anio),
-            "FONDO DOCUMENTAL",
-            self._nivel_escribano(escribano),
-            self._nivel_anio(anio),
-            self._nivel_protocolo(record),
-            self._nivel_registro(record, registro_id),
-            self._nivel_titulo(record),
-            self._nivel_mes(mes),
-            self._nivel_interesado1(record),
-            self._nombre_archivo(record, registro_id),
-        ]
+        niveles_modelo = self._modelo.jerarquia.niveles
+        if niveles_modelo:
+            niveles = [
+                self._render_nivel(
+                    nivel, record, acervo_num, escribano, siglo, anio, mes
+                )
+                for nivel in niveles_modelo
+            ]
+        else:
+            # Fallback para el modelo legacy sin plantilla declarada.
+            niveles = [
+                self._nivel_acervo(acervo_num),
+                self._nivel_siglo(siglo, anio),
+                "FONDO DOCUMENTAL",
+                self._nivel_escribano(escribano),
+                self._nivel_anio(anio),
+                self._nivel_protocolo(record),
+                self._nivel_registro(record, registro_id),
+                self._nivel_titulo(record),
+                self._nivel_mes(mes),
+                self._nivel_interesado1(record),
+                self._nombre_archivo(record, registro_id),
+            ]
 
         full_path = os.path.join(output_dir, *niveles)
         return self._resolver_colision(full_path)
+
+    def _render_nivel(
+        self,
+        nivel: NivelJerarquia,
+        record: InventoryRecord,
+        acervo_num: str,
+        escribano: str,
+        siglo: str,
+        anio: Optional[int],
+        mes: Optional[int],
+    ) -> str:
+        """Renderiza un nivel declarativo de la plantilla."""
+        tipo = nivel.tipo
+        respaldo = nivel.respaldo
+        plantilla = nivel.plantilla or "{valor}"
+
+        if tipo == "constante":
+            valor = nivel.valor
+        elif tipo == "acervo":
+            valor = self._valor_acervo(acervo_num)
+            if not valor:
+                return respaldo
+        elif tipo == "siglo":
+            valor = self._valor_siglo(siglo, anio)
+            if not valor:
+                return respaldo
+        elif tipo == "escribano":
+            valor = self._sanitize((escribano or "").strip())
+            if not (escribano or "").strip():
+                return respaldo
+        elif tipo == "anio":
+            if anio is None:
+                return respaldo
+            valor = str(anio)
+        elif tipo == "mes":
+            if mes is None:
+                return respaldo
+            valor = MONTH_NAMES.get(mes, respaldo)
+        elif tipo == "protocolo":
+            valor = self._sanitize((record.protocolo or "").strip())
+            if not (record.protocolo or "").strip():
+                return respaldo
+        elif tipo == "tomo":
+            valor = self._sanitize((record.tomo or "").strip())
+            if not (record.tomo or "").strip():
+                return respaldo
+        elif tipo == "registro":
+            raw = self._valor_registro(record)
+            if not raw:
+                return respaldo
+            valor = self._sanitize(raw)
+        elif tipo == "escritura":
+            raw = (record.escritura or "").strip()
+            if raw in ("-", "—"):
+                raw = ""
+            if not raw:
+                return respaldo
+            valor = self._sanitize(raw)
+        elif tipo == "titulo":
+            valor = self._sanitize((record.titulo or "").strip())
+            if not (record.titulo or "").strip():
+                return respaldo
+        elif tipo == "interesado1":
+            valor = self._primer_interesado_disponible(
+                record.interesado1, record.interesado2, record.interesado3
+            )
+            if not valor:
+                return respaldo
+            valor = self._sanitize(valor)
+        elif tipo == "archivo":
+            nombre = self._primer_interesado_disponible(
+                record.interesado2, record.interesado1, record.interesado3
+            )
+            if not nombre:
+                return respaldo
+            return f"{self._sanitize(nombre)}.pdf"
+        elif tipo == "campo":
+            campo = nivel.campo or ""
+            raw = str(getattr(record, campo, "") or "").strip()
+            if not raw:
+                return respaldo
+            valor = self._sanitize(raw)
+        else:
+            valor = nivel.valor or respaldo
+
+        if nivel.mayusculas:
+            valor = valor.upper()
+        if nivel.truncar and len(valor) > nivel.truncar:
+            valor = valor[:nivel.truncar].rstrip()
+        return plantilla.format(valor=valor)
+
+    @staticmethod
+    def _valor_acervo(acervo_num: str) -> str:
+        valor = (acervo_num or "").strip()
+        return HierarchyBuilder._sanitize(valor) if valor else ""
+
+    @staticmethod
+    def _valor_siglo(siglo: str, anio: Optional[int]) -> str:
+        romano = (siglo or "").strip().upper()
+        if romano:
+            arabico = ROMAN_TO_ARABIC.get(romano)
+            return str(arabico) if arabico is not None else romano
+        if anio is not None:
+            return str((anio // 100) + 1)
+        return ""
+
+    @staticmethod
+    def _valor_registro(record: InventoryRecord) -> str:
+        valor = (record.registro or "").strip()
+        if valor and valor not in ("0", "00:00:00") and ":" not in valor \
+                and not re.search(r'(?i)(registro|protocolo|indice|salto)', valor):
+            return valor
+        return ""
 
     @staticmethod
     def _nivel_acervo(acervo_num: str) -> str:

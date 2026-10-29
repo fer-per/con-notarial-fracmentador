@@ -8,7 +8,7 @@ import os
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QSpinBox, QFileDialog, QGroupBox, QGridLayout,
+    QSpinBox, QComboBox, QFileDialog, QGroupBox, QGridLayout,
     QSizePolicy,
 )
 from PySide6.QtCore import Qt, QSize
@@ -246,19 +246,36 @@ class WorkspaceView(QWidget):
 
         # ─── PASO 1: Carga de Archivos ──────────────────────
         step1 = QGroupBox("PASO 1 \u2014 Carga de Archivos")
-        step1_layout = QHBoxLayout(step1)
-        step1_layout.setSpacing(16)
+        step1_layout = QVBoxLayout(step1)
+        step1_layout.setSpacing(10)
+
+        modelo_row = QHBoxLayout()
+        modelo_row.addWidget(QLabel("Modelo de catálogo:"))
+        self._modelo_combo = QComboBox()
+        self._modelo_combo.setMinimumWidth(220)
+        self._modelo_combo.setToolTip(
+            "Se detecta automáticamente al cargar el Excel; "
+            "podés cambiarlo manualmente."
+        )
+        self._cargar_modelos()
+        modelo_row.addWidget(self._modelo_combo)
+        modelo_row.addStretch()
+        step1_layout.addLayout(modelo_row)
+
+        drops_layout = QHBoxLayout()
+        drops_layout.setSpacing(16)
 
         self._excel_drop = DropZone(
             ICON_EXCEL, "INVENTARIO EXCEL", "*.xlsx"
         )
-        step1_layout.addWidget(self._excel_drop, stretch=1)
+        drops_layout.addWidget(self._excel_drop, stretch=1)
 
         self._pdf_drop = DropZone(
             ICON_PDF, "PDF ORIGINAL", "*.pdf"
         )
-        step1_layout.addWidget(self._pdf_drop, stretch=1)
+        drops_layout.addWidget(self._pdf_drop, stretch=1)
 
+        step1_layout.addLayout(drops_layout)
         layout.addWidget(step1)
 
         # ─── PASO 2: Parámetros de Mapeo ────────────────────
@@ -339,7 +356,46 @@ class WorkspaceView(QWidget):
 
         layout.addWidget(step3, stretch=1)
 
+    def _cargar_modelos(self):
+        """Carga los modelos disponibles en el selector."""
+        self._modelo_combo.clear()
+        try:
+            modelos = self._container.modelo_repo.listar()
+        except Exception as e:
+            logger.warning("No se pudieron cargar los modelos: %s", e)
+            modelos = []
+        for modelo in modelos:
+            self._modelo_combo.addItem(modelo.nombre, modelo.id)
+            idx = self._modelo_combo.count() - 1
+            self._modelo_combo.setItemData(
+                idx, modelo.descripcion, Qt.ItemDataRole.ToolTipRole
+            )
+        self._sync_modelo_combo()
+
+    def _sync_modelo_combo(self, modelo_id: str = ""):
+        """Selecciona en el combo el modelo activo sin emitir señales."""
+        combo = getattr(self, "_modelo_combo", None)
+        if combo is None:
+            return
+        objetivo = modelo_id or getattr(self._state, "modelo_id", "historico")
+        idx = combo.findData(objetivo)
+        if idx < 0:
+            return
+        combo.blockSignals(True)
+        try:
+            combo.setCurrentIndex(idx)
+        finally:
+            combo.blockSignals(False)
+
+    def _on_modelo_changed(self, index: int):
+        modelo_id = self._modelo_combo.itemData(index)
+        if modelo_id:
+            self._vm.set_modelo(modelo_id)
+
     def _connect_signals(self):
+        # Selector de modelo
+        self._modelo_combo.currentIndexChanged.connect(self._on_modelo_changed)
+
         # Drop zones
         self._excel_drop.mousePressEvent = self._on_excel_click
         self._pdf_drop.mousePressEvent = self._on_pdf_click
@@ -361,8 +417,9 @@ class WorkspaceView(QWidget):
         self._vm.loading_finished.connect(self._on_loading_finished)
         self._vm.loading_error.connect(self._on_loading_error)
 
-        # State signals → actualizar tabla
+        # State signals → actualizar tabla y selector
         self._state.records_changed.connect(self._refresh_table)
+        self._state.modelo_changed.connect(self._sync_modelo_combo)
 
     def _on_excel_click(self, event):
         path, _ = QFileDialog.getOpenFileName(
@@ -411,6 +468,7 @@ class WorkspaceView(QWidget):
             pass
 
     def _on_loading_finished(self, result):
+        self._sync_modelo_combo()
         self._fila_inicio_spin.setValue(self._state.fila_inicio)
         self._fila_fin_spin.setValue(self._state.fila_fin)
         self._pag_pdf_spin.setValue(self._state.pag_pdf_inicio)
@@ -437,6 +495,10 @@ class WorkspaceView(QWidget):
         else:
             self._pdf_drop.clear()
 
+        self._sync_modelo_combo()
+        aplicar_modelo = getattr(self._vm, "aplicar_modelo_guardado", None)
+        if aplicar_modelo is not None:
+            aplicar_modelo()
         self._fila_inicio_spin.setValue(self._state.fila_inicio)
         self._fila_fin_spin.setValue(self._state.fila_fin)
         self._pag_pdf_spin.setValue(self._state.pag_pdf_inicio)

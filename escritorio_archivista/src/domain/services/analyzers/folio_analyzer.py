@@ -3,9 +3,9 @@ Analizador de folios — detecta errores de secuencia en el inventario.
 
 Detecta:
 1. FORMATO — folio_str no parseable (fatal)
-2. REPETIDO — mismo folio de inicio en dos registros (fatal)
-3. SOLAPAMIENTO — rango actual se solapa con el anterior (fatal)
-4. SALTO — salto no justificado por exclusiones (warning)
+2. SOLAPAMIENTO — el folio de inicio ya fue cubierto por un rango
+   anterior, incluido el mismo folio inicial repetido (advertencia)
+3. SALTO — salto no justificado por exclusiones (advertencia)
 """
 import logging
 from typing import List, Optional
@@ -45,7 +45,7 @@ def analizar_folios(
     errores: List[AnalysisError] = []
     advertencias: List[AnalysisError] = []
     seen_starts: dict = {}  # {folio_int_inicio: record_id}
-    prev_hasta_int: Optional[int] = None
+    max_hasta_int: Optional[int] = None
     expected_next_int: Optional[int] = None
     prev_protocolo: Optional[str] = None
     last_was_sf = False
@@ -59,7 +59,7 @@ def analizar_folios(
         # reinician entre protocolos), por lo que se resetea el estado.
         if prev_protocolo is not None and record.protocolo != prev_protocolo:
             seen_starts = {}
-            prev_hasta_int = None
+            max_hasta_int = None
             expected_next_int = None
             last_was_sf = False
         prev_protocolo = record.protocolo
@@ -104,59 +104,54 @@ def analizar_folios(
         hasta_int = folio_to_int(hasta_num, hasta_cara)
 
         # Los registros que comparten hoja (comparte_hoja=True) arrancan en
-        # el mismo folio donde terminó el anterior: REPETIDO, SOLAPAMIENTO y
-        # SALTO son esperados en ese caso y no constituyen error fatal.
+        # el mismo folio donde terminó el anterior: SOLAPAMIENTO y SALTO son
+        # esperados en ese caso y no se reportan.
         comparte_hoja = bool(getattr(record, "comparte_hoja", False))
 
-        # 2. REPETIDO — en protocolos escaneados la numeración de folios
-        # puede repetirse (mismo número, distinto contenido): es una
-        # advertencia, no un error fatal.
-        if desde_int in seen_starts:
-            if not comparte_hoja:
-                advertencias.append(AnalysisError(
-                    record_id=record.id,
-                    fila=record.fila,
-                    tipo="REPETIDO",
-                    descripcion=(
-                        f"El folio de inicio '{record.folios}' ya fue usado "
-                        f"por el registro {seen_starts[desde_int]}."
-                    ),
-                    valor_actual=record.folios,
-                    valor_esperado="Folio único",
-                    fatal=False,
-                ))
-            # El registro ocupa folios reales: los siguientes se validan
-            # contra este rango.
-            prev_hasta_int = hasta_int
-            expected_next_int = hasta_int + 1
-            continue
-        seen_starts[desde_int] = record.id
-
-        # 3. SOLAPAMIENTO
+        # 2. SOLAPAMIENTO — el folio de inicio ya está cubierto por el rango
+        # más amplio visto en el protocolo actual. Incluye el borde compartido
+        # y el mismo folio inicial repetido.
         if (
-            prev_hasta_int is not None
-            and desde_int <= prev_hasta_int
-            and not comparte_hoja
+            not comparte_hoja
+            and max_hasta_int is not None
+            and desde_int <= max_hasta_int
         ):
-            errores.append(AnalysisError(
+            inicio_repetido = seen_starts.get(desde_int)
+            if inicio_repetido:
+                descripcion = (
+                    f"El folio de inicio '{record.folios}' se repite y se "
+                    f"solapa con el rango del registro {inicio_repetido}."
+                )
+            else:
+                descripcion = (
+                    f"El rango '{record.folios}' se solapa con el rango ya "
+                    f"delimitado hasta el folio "
+                    f"{_format_folio_int(max_hasta_int)}."
+                )
+            advertencias.append(AnalysisError(
                 record_id=record.id,
                 fila=record.fila,
                 tipo="SOLAPAMIENTO",
-                descripcion=(
-                    f"El rango '{record.folios}' se solapa con el registro anterior."
-                ),
+                descripcion=descripcion,
                 valor_actual=record.folios,
-                valor_esperado=f"Inicio > folio {prev_hasta_int}",
-                fatal=True,
+                valor_esperado=(
+                    f"Inicio > folio {_format_folio_int(max_hasta_int)}"
+                ),
+                fatal=False,
             ))
-            # No actualizar prev_hasta_int para evitar cascada
+            max_hasta_int = max(max_hasta_int, hasta_int)
+            expected_next_int = max_hasta_int + 1
+            seen_starts.setdefault(desde_int, record.id)
+            last_was_sf = False
+            if record.estado == "VALIDADO":
+                validados += 1
             continue
 
-        # 4. SALTO
+        # 3. SALTO
         if (
-            expected_next_int is not None
+            not comparte_hoja
+            and expected_next_int is not None
             and desde_int != expected_next_int
-            and not comparte_hoja
         ):
             if not last_was_sf and not _salto_aprobado(expected_next_int, desde_int, exclusions):
                 advertencias.append(AnalysisError(
@@ -173,9 +168,11 @@ def analizar_folios(
                     fatal=False,
                 ))
 
-        # Actualizar tracking
-        prev_hasta_int = hasta_int
-        expected_next_int = hasta_int + 1
+        # Actualizar tracking con el mayor folio cubierto del protocolo.
+        if max_hasta_int is None or hasta_int > max_hasta_int:
+            max_hasta_int = hasta_int
+        expected_next_int = max_hasta_int + 1
+        seen_starts.setdefault(desde_int, record.id)
         last_was_sf = False
 
         if record.estado == "VALIDADO":

@@ -30,6 +30,11 @@ class InventoryRecord:
     responsable_descripcion: str = ""  # Responsable de la descripción
     comparte_hoja: bool = False    # Comparte la última hoja PDF con el registro anterior
     pg_pdf_manual: str = ""        # Rango de páginas PDF manual (vacío = calculado)
+    escritura: str = ""            # N° de escritura (catálogos notariales)
+    tomo: str = ""                 # N° de tomo (catálogos notariales)
+    alcance: str = ""              # Alcance y contenido
+    estado_conservacion: str = ""  # Estado de conservación
+    fecha_descripcion: str = ""    # Fecha de la descripción
 
 
 @dataclass

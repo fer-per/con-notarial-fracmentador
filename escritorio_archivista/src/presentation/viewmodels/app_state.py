@@ -38,6 +38,7 @@ class AppStateVM(QObject):
     config_changed = Signal()
     session_changed = Signal()
     theme_changed = Signal(bool)
+    modelo_changed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -48,6 +49,10 @@ class AppStateVM(QObject):
         self._output_dir: str = DEFAULT_OUTPUT_DIR
         self._profile_name: Optional[str] = None
         self._saved_snapshot: Optional[dict] = None
+
+        # ─── Modelo de catálogo ──────────────────────────────
+        self._modelo_id: str = "historico"
+        self._modelo_auto: bool = True
 
         # ─── Datos del inventario ────────────────────────────
         self._records: List[InventoryRecord] = []
@@ -117,6 +122,28 @@ class AppStateVM(QObject):
     def profile_name(self, value: Optional[str]):
         self._profile_name = value
         self.session_changed.emit()
+
+    @property
+    def modelo_id(self) -> str:
+        return self._modelo_id
+
+    @modelo_id.setter
+    def modelo_id(self, value: str):
+        nuevo = (value or "historico").strip() or "historico"
+        if nuevo == self._modelo_id:
+            return
+        self._modelo_id = nuevo
+        self.modelo_changed.emit(nuevo)
+        self.config_changed.emit()
+        self.session_changed.emit()
+
+    @property
+    def modelo_auto(self) -> bool:
+        return self._modelo_auto
+
+    @modelo_auto.setter
+    def modelo_auto(self, value: bool):
+        self._modelo_auto = bool(value)
 
     @property
     def records(self) -> List[InventoryRecord]:
@@ -365,6 +392,8 @@ class AppStateVM(QObject):
             "excel_path": self._excel_path,
             "pdf_path": self._pdf_path,
             "output_dir": self._output_dir,
+            "modelo_id": self._modelo_id,
+            "modelo_auto": self._modelo_auto,
             "fila_datos_inicio": self._fila_datos_inicio,
             "fila_inicio": self._fila_inicio,
             "fila_fin": self._fila_fin,
@@ -389,6 +418,8 @@ class AppStateVM(QObject):
         self._excel_path = data.get("excel_path")
         self._pdf_path = data.get("pdf_path")
         self._output_dir = data.get("output_dir") or DEFAULT_OUTPUT_DIR
+        self._modelo_id = data.get("modelo_id") or "historico"
+        self._modelo_auto = bool(data.get("modelo_auto", True))
         self._fila_datos_inicio = data.get("fila_datos_inicio", 0)
         self._fila_inicio = data.get("fila_inicio", 0)
         self._fila_fin = data.get("fila_fin", 0)
@@ -418,6 +449,7 @@ class AppStateVM(QObject):
         self.suggestions_changed.emit()
         self.pdf_changed.emit()
         self.config_changed.emit()
+        self.modelo_changed.emit(self._modelo_id)
         self.session_changed.emit()
 
         # Al restaurar un perfil, el estado coincide con lo guardado en disco.
@@ -441,6 +473,8 @@ class AppStateVM(QObject):
         self._pdf_path = None
         self._output_dir = DEFAULT_OUTPUT_DIR
         self._profile_name = None
+        self._modelo_id = "historico"
+        self._modelo_auto = True
         self._records = []
         self._exclusions = []
         self._suggestions = []
@@ -469,6 +503,7 @@ class AppStateVM(QObject):
         self.logs_changed.emit()
         self.pdf_changed.emit()
         self.config_changed.emit()
+        self.modelo_changed.emit(self._modelo_id)
         self.session_changed.emit()
 
         self.mark_saved()

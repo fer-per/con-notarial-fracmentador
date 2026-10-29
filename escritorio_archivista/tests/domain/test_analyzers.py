@@ -52,14 +52,15 @@ class TestFolioAnalyzer:
         assert result.errores[0].tipo == "FORMATO"
         assert result.errores[0].fatal is True
 
-    def test_folio_repetido_es_advertencia(self):
+    def test_folio_repetido_es_solapamiento(self):
         records = [
             _rec(id="#0001", folios="001r-002v"),
             _rec(id="#0002", fila=11, folios="001r-003v"),
         ]
         result = analizar_folios(records)
+        assert len(result.errores) == 0
         assert len(result.advertencias) == 1
-        assert result.advertencias[0].tipo == "REPETIDO"
+        assert result.advertencias[0].tipo == "SOLAPAMIENTO"
         assert result.advertencias[0].fatal is False
 
     def test_solapamiento(self):
@@ -68,8 +69,41 @@ class TestFolioAnalyzer:
             _rec(id="#0002", fila=11, folios="003r-006v"),
         ]
         result = analizar_folios(records)
-        assert len(result.errores) == 1
-        assert result.errores[0].tipo == "SOLAPAMIENTO"
+        assert len(result.errores) == 0
+        assert len(result.advertencias) == 1
+        assert result.advertencias[0].tipo == "SOLAPAMIENTO"
+        assert result.advertencias[0].fatal is False
+
+    def test_solapamiento_en_borde_compartido(self):
+        records = [
+            _rec(id="#0001", folios="001r-002v"),
+            _rec(id="#0002", fila=11, folios="002v-003v"),
+        ]
+        result = analizar_folios(records)
+        assert len(result.errores) == 0
+        assert len(result.advertencias) == 1
+        assert result.advertencias[0].tipo == "SOLAPAMIENTO"
+
+    def test_mismo_inicio_es_solapamiento(self):
+        records = [
+            _rec(id="#0001", folios="115r"),
+            _rec(id="#0002", fila=11, folios="115r-118v"),
+        ]
+        result = analizar_folios(records)
+        assert len(result.errores) == 0
+        assert len(result.advertencias) == 1
+        assert result.advertencias[0].tipo == "SOLAPAMIENTO"
+        assert "se repite" in result.advertencias[0].descripcion
+
+    def test_solapamiento_no_genera_salto_posterior(self):
+        records = [
+            _rec(id="#0001", folios="001r-002v"),
+            _rec(id="#0002", fila=11, folios="002v-003v"),
+            _rec(id="#0003", fila=12, folios="004r-005v"),
+        ]
+        result = analizar_folios(records)
+        assert len(result.errores) == 0
+        assert [e.tipo for e in result.advertencias] == ["SOLAPAMIENTO"]
 
     def test_salto_no_justificado(self):
         records = [
@@ -121,14 +155,15 @@ class TestFolioAnalyzer:
         assert len(result.errores) == 0
         assert len(result.advertencias) == 0
 
-    def test_repetido_dentro_del_mismo_protocolo(self):
+    def test_repetido_dentro_del_mismo_protocolo_es_solapamiento(self):
         records = [
             _rec(id="#0001", folios="001r-002v", protocolo="2"),
             _rec(id="#0002", fila=11, folios="001r-003v", protocolo="2"),
         ]
         result = analizar_folios(records)
+        assert len(result.errores) == 0
         assert len(result.advertencias) == 1
-        assert result.advertencias[0].tipo == "REPETIDO"
+        assert result.advertencias[0].tipo == "SOLAPAMIENTO"
 
     def test_cambio_de_protocolo_reinicia_secuencia_esperada(self):
         records = [
@@ -169,14 +204,14 @@ class TestFolioAnalyzer:
         assert len(result.errores) == 0
         assert len(result.advertencias) == 0
 
-    def test_repetido_sin_comparte_hoja_es_advertencia(self):
+    def test_repetido_sin_comparte_hoja_es_solapamiento(self):
         records = [
             _rec(id="#0001", folios="001r-002v"),
             _rec(id="#0002", fila=11, folios="001r-003v"),
         ]
         result = analizar_folios(records)
         assert len(result.advertencias) == 1
-        assert result.advertencias[0].tipo == "REPETIDO"
+        assert result.advertencias[0].tipo == "SOLAPAMIENTO"
         assert result.advertencias[0].fatal is False
 
     def test_secuencia_despues_de_comparte_hoja_sigue_siendo_correcta(self):

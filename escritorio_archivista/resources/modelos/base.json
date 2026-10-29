@@ -1,0 +1,101 @@
+{
+  "version": 2,
+  "id": "base",
+  "nombre": "Configuración común",
+  "descripcion": "Valores compartidos por todos los modelos de catálogo. Los modelos concretos solo declaran sus diferencias.",
+  "excel": {
+    "hoja": 0,
+    "filas_encabezado": 2,
+    "campos_fuertes": ["registro", "escribano", "folios"],
+    "ignorar_si_sin_fuertes": true,
+    "anotaciones": [
+      "nombres y apellidos",
+      "recto v=verso",
+      "sin espacio",
+      "mayuscula",
+      "fecha corta"
+    ],
+    "ignorar_prefijos": ["protocolo", "registro", "fecha", "data cronica"],
+    "ignorar_regex": [],
+    "detectar_keywords": [],
+    "detectar_min_matches": 2
+  },
+  "metadatos": {},
+  "columnas": {
+    "registro": {
+      "aliases": ["n° de registro", "numero de registro", "registro", "id", "expediente"]
+    },
+    "escribano": {
+      "aliases": ["escribano", "notario", "productor"]
+    },
+    "protocolo": {
+      "aliases": ["n° de prot", "protocolo", "prot"]
+    },
+    "folios": {
+      "aliases": ["n° de folios", "folios", "rango", "paginas"]
+    },
+    "titulo": {
+      "aliases": ["titulo", "asunto"]
+    },
+    "data_topica": {
+      "aliases": ["data top", "lugar", "topica"]
+    },
+    "fecha_inicio": {
+      "aliases": ["fecha inicial", "data cronica 1", "inicial", "inicio"]
+    },
+    "fecha_fin": {
+      "aliases": ["fecha final", "data cronica 2", "final", "fin"]
+    },
+    "interesado1": {
+      "aliases": [
+        "interesado 1",
+        "interesado",
+        "otorgante/interesado 1",
+        "otorgante /interesado 1",
+        "otorgante / interesado 1"
+      ]
+    },
+    "interesado2": {
+      "aliases": [
+        "interesado 2",
+        "interesante 2",
+        "otorgante/interesado 2",
+        "otorgante/interesante 2",
+        "otorgante /interesante 2"
+      ]
+    },
+    "interesado3": {
+      "aliases": [
+        "interesado 3",
+        "interesante 3",
+        "otorgante/interesado 3",
+        "otorgante/interesante 3",
+        "otorgante /interesante 3"
+      ]
+    },
+    "observaciones": {
+      "aliases": ["observaciones", "observacion", "notas"]
+    },
+    "responsable_descripcion": {
+      "aliases": [
+        "responsable de la descripcion",
+        "resp. descripcion",
+        "responsable descripcion",
+        "responsable"
+      ]
+    }
+  },
+  "folios": {
+    "comparte_hoja_si_borde": false,
+    "tolerar_solapamiento_borde": false
+  },
+  "analizadores": {
+    "folios": true,
+    "topica": true,
+    "cronica": true,
+    "coverage": true,
+    "registro": true,
+    "escribano": true,
+    "protocolo": true
+  }
+}

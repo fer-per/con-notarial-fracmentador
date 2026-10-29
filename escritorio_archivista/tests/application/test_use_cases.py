@@ -60,6 +60,20 @@ class TestAnalizarDatosUseCase:
         assert result.folios_result is not None
         assert len(result.folios_result.advertencias) == 1
 
+    def test_solapamiento_es_advertencia_y_no_marca_revisar(self):
+        records = [
+            _rec(id="#0001", folios="001r-002v"),
+            _rec(id="#0002", fila=11, folios="002v-003v"),
+        ]
+        uc = AnalizarDatosUseCase()
+        result = uc.ejecutar(records)
+
+        assert len(result.folios_result.errores) == 0
+        assert len(result.folios_result.advertencias) == 1
+        assert result.folios_result.advertencias[0].tipo == "SOLAPAMIENTO"
+        assert result.records[1].estado != "REVISAR"
+        assert result.metadata["registros_revisar"] == 0
+
     def test_analisis_con_coverage(self):
         records = [_rec(id="#0001", folios="001r-002v")]
         uc = AnalizarDatosUseCase()

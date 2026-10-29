@@ -7,6 +7,7 @@ de infraestructura con los casos de uso.
 import logging
 
 from src.infrastructure.excel_repository import ExcelRepository
+from src.infrastructure.modelo_repository import ModeloRepository
 from src.infrastructure.pdf_service import PDFService
 from src.infrastructure.session_repository import SessionRepository
 from src.infrastructure.hierarchy_builder import HierarchyBuilder
@@ -34,10 +35,12 @@ class Container:
         logger.info("Inicializando Container DI...")
 
         # Infraestructura
-        self._excel_repo = ExcelRepository()
+        self.modelo_repo = ModeloRepository()
+        self.modelo_actual = self.modelo_repo.cargar("historico")
+        self._excel_repo = ExcelRepository(self.modelo_actual)
         self._pdf_service = PDFService()
         self._session_repo = SessionRepository()
-        self._hierarchy_builder = HierarchyBuilder()
+        self._hierarchy_builder = HierarchyBuilder(self.modelo_actual)
 
         # Casos de uso
         self.cargar_inventario = CargarInventarioUseCase(self._excel_repo)
@@ -54,6 +57,15 @@ class Container:
         self.excel_repo = self._excel_repo
 
         logger.info("Container DI inicializado.")
+
+    def set_modelo(self, modelo_id: str):
+        """Activa un modelo de catálogo en el repositorio y el builder."""
+        modelo = self.modelo_repo.cargar(modelo_id or "historico")
+        self.modelo_actual = modelo
+        self._excel_repo.set_modelo(modelo)
+        self._hierarchy_builder.set_modelo(modelo)
+        logger.info("Modelo de catálogo activo: %s", modelo.id)
+        return modelo
 
     def crear_mapper(self, estado: dict):
         """

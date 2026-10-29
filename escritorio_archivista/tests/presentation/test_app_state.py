@@ -109,6 +109,35 @@ class TestPaginaFisicaAPosicion:
         assert state.pagina_fisica_a_posicion(2) is None
 
 
+class TestModeloCatalogoState:
+    def test_modelo_por_defecto_es_historico(self):
+        state = AppStateVM()
+        assert state.modelo_id == "historico"
+        assert state.modelo_auto is True
+
+    def test_modelo_se_serializa_y_restaura(self):
+        state = AppStateVM()
+        state.modelo_id = "notarial"
+        state.modelo_auto = False
+
+        data = state.to_dict()
+        restaurado = AppStateVM()
+        restaurado.from_dict(data)
+
+        assert restaurado.modelo_id == "notarial"
+        assert restaurado.modelo_auto is False
+
+    def test_reset_vuelve_a_historico_y_autodeteccion(self):
+        state = AppStateVM()
+        state.modelo_id = "notarial"
+        state.modelo_auto = False
+
+        state.reset()
+
+        assert state.modelo_id == "historico"
+        assert state.modelo_auto is True
+
+
 class TestDirectorioSalidaPredeterminado:
     def test_output_dir_por_defecto_es_el_predeterminado(self):
         state = AppStateVM()

@@ -57,6 +57,8 @@ def parse_folios(folio_str: str) -> Optional[FolioTuple]:
     if not folio_str or not isinstance(folio_str, str):
         return None
     folio_str = folio_str.strip().lower()
+    # "2251r 2252r" se interpreta como rango sin guion.
+    folio_str = re.sub(r'(?<=\d[rv])\s+(?=\d)', '-', folio_str)
     # Normalizar espacios alrededor del guion: "99v - 100v" -> "99v-100v"
     folio_str = re.sub(r'\s+', '', folio_str)
 

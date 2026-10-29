@@ -31,6 +31,7 @@ class LoadInventoryWorker(QRunnable):
     @Slot()
     def run(self):
         try:
+            self._container.set_modelo(self._state.modelo_id)
             # Con mapeo automático y fila_fin sin definir (0), se amplía el
             # límite superior para detectar la última fila con datos reales.
             fila_fin = self._state.fila_fin if self._state.fila_fin else 10 ** 6
@@ -67,11 +68,42 @@ class WorkspaceVM(QObject):
         self._thread_pool = QThreadPool()
 
     def set_excel_path(self, path: str):
-        """Establece la ruta del Excel y carga el inventario."""
+        """Establece la ruta del Excel, detecta el modelo y carga el inventario."""
         self._state.excel_path = path
         self._state.fila_datos_auto = True
         self._state.add_log("INFO", f"Excel seleccionado: {path}")
+        self._detectar_modelo(path)
         self.load_inventory()
+
+    def set_modelo(self, modelo_id: str, recargar: bool = True):
+        """Aplica manualmente un modelo de catálogo y recarga si corresponde."""
+        self._state.modelo_auto = False
+        self._state.modelo_id = modelo_id
+        self._container.set_modelo(modelo_id)
+        self._state.add_log("INFO", f"Modelo de catálogo: {modelo_id}")
+        if recargar and self._state.excel_path:
+            self.load_inventory()
+
+    def aplicar_modelo_guardado(self):
+        """Sincroniza el modelo restaurado de una sesión sin recargar."""
+        self._container.set_modelo(self._state.modelo_id)
+
+    def _detectar_modelo(self, path: str):
+        """Detecta el modelo por encabezados y respeta el override manual."""
+        if not self._state.modelo_auto:
+            self._container.set_modelo(self._state.modelo_id)
+            return
+        try:
+            detectado = self._container.modelo_repo.detectar(path)
+        except Exception as e:
+            logger.warning("No se pudo detectar el modelo del Excel: %s", e)
+            detectado = None
+        if detectado:
+            self._state.modelo_id = detectado
+            self._state.add_log(
+                "INFO", f"Modelo detectado automáticamente: {detectado}"
+            )
+        self._container.set_modelo(self._state.modelo_id)
 
     def set_pdf_path(self, path: str):
         """Establece la ruta del PDF."""

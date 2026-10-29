@@ -56,6 +56,10 @@ class TestParseFolios:
         """Debe normalizar a minúsculas."""
         assert parse_folios("001R-002V") == (1, 'r', 2, 'v')
 
+    def test_rango_separado_por_espacio_sin_guion(self):
+        """Algunos catálogos escriben el rango como '2251r 2252r'."""
+        assert parse_folios("2251r 2252r") == (2251, 'r', 2252, 'r')
+
     def test_none_input(self):
         assert parse_folios(None) is None
 

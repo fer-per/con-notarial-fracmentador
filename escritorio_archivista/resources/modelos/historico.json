@@ -1,0 +1,102 @@
+{
+  "id": "historico",
+  "nombre": "Fragmentador histórico",
+  "descripcion": "Catálogo histórico con metadatos en las filas 4, 6 y 7 y jerarquía de 11 niveles.",
+  "hereda_de": "base",
+  "excel": {
+    "detectar_keywords": ["escribano", "n° de prot", "n° de folios", "registro"],
+    "detectar_min_matches": 2
+  },
+  "metadatos": {
+    "siglo": {
+      "fila": 4,
+      "columna": 1,
+      "regex": "Sección:\\s*([IVXLCDM]+)",
+      "grupo": 1,
+      "transformacion": "siglo_romano"
+    },
+    "escribano": {
+      "fila": 6,
+      "columna": 1,
+      "transformacion": "texto"
+    },
+    "acervo": {
+      "fila": 7,
+      "columna": 1,
+      "regex": "N?(\\d+)",
+      "grupo": 1,
+      "transformacion": "numero"
+    }
+  },
+  "columnas": {
+    "titulo": {
+      "aliases": ["titulo", "escritura", "asunto"],
+      "indice_fallback": 7
+    },
+    "fecha_inicio": {
+      "aliases": ["fecha inicial", "data cronica 1", "inicial", "inicio"],
+      "indice_fallback": 5
+    },
+    "protocolo": {
+      "aliases": ["n° de prot", "protocolo", "prot", "tomo"]
+    }
+  },
+  "jerarquia": {
+    "niveles": [
+      {
+        "tipo": "acervo",
+        "plantilla": "ACERVO DOCUMENTAL NUMERO {valor}",
+        "respaldo": "ACERVO DOCUMENTAL",
+        "mayusculas": true
+      },
+      {
+        "tipo": "siglo",
+        "plantilla": "SIGLO {valor}",
+        "respaldo": "SIN SIGLO",
+        "mayusculas": true
+      },
+      {
+        "tipo": "constante",
+        "valor": "FONDO DOCUMENTAL"
+      },
+      {
+        "tipo": "escribano",
+        "respaldo": "SIN ESCRIBANO",
+        "mayusculas": true
+      },
+      {
+        "tipo": "anio",
+        "respaldo": "SIN AÑO"
+      },
+      {
+        "tipo": "protocolo",
+        "plantilla": "PROTOCOLO {valor}",
+        "respaldo": "SIN PROTOCOLO",
+        "mayusculas": true
+      },
+      {
+        "tipo": "registro",
+        "plantilla": "REGISTRO {valor}",
+        "respaldo": "SIN REGISTRO",
+        "mayusculas": true
+      },
+      {
+        "tipo": "titulo",
+        "respaldo": "SIN TITULO DE ESCRITURA",
+        "mayusculas": true
+      },
+      {
+        "tipo": "mes",
+        "respaldo": "SIN MES"
+      },
+      {
+        "tipo": "interesado1",
+        "respaldo": "DATOS DE LOS INTERESADOS ILEGIBLES"
+      },
+      {
+        "tipo": "archivo",
+        "respaldo": "DATOS DE LOS INTERESADOS ILEGIBLES.pdf"
+      }
+    ]
+  }
+}
